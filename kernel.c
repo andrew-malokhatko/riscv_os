@@ -2,6 +2,7 @@
 #include "common.h"
 
 extern char __bss[], __bss_end[], __stack_top[];
+extern char __free_ram[], __free_ram_end[];
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5,
                         long fid, long eid)
@@ -119,6 +120,16 @@ void handle_trap(void)
     PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
 }
 
+paddr_t alloc_pages(uint32_t n)
+{
+    static paddr_t next_addr = (paddr_t)__free_ram;
+    paddr_t paddr = next_addr;
+    next_addr += n * PAGE_SIZE;
+
+    memset((void*)paddr, 0, n * PAGE_SIZE);
+    return paddr;
+}
+
 void kernel_main(void)
 {
     memset(__bss, 0, (size_t)__bss_end - (size_t)__bss);
@@ -129,11 +140,18 @@ void kernel_main(void)
     printf("1 + 2 = %d\n", 1 + 2);
     printf("%x\n", 0x1234abcd);
 
+    paddr_t paddr1 = alloc_pages(2);
+    paddr_t paddr2 = alloc_pages(1);
 
+    printf("alloc pages test: paddr1 = 0x%x\n", paddr1);
+    printf("alloc pages test: paddr2 = 0x%x\n", paddr2);
+
+    PANIC("Booted!");
+
+#if 0
     // call trap_handler
     __asm__ __volatile__("unimp");
 
-#if 0
 
     PANIC("Booted!");
     printf("Does not display");
