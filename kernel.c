@@ -4,6 +4,14 @@
 extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 
+struct process procs[PROCS_MAX];
+
+struct process* current_proc;
+struct process* idle_proc;
+
+struct process* proc_a;
+struct process* proc_b;
+
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4, long arg5,
                         long fid, long eid)
 {
@@ -130,12 +138,168 @@ paddr_t alloc_pages(uint32_t n)
     return paddr;
 }
 
+__attribute__((naked))
+void switch_context(uint32_t* prev_sp, uint32_t* next_sp)
+{
+    __asm__ __volatile__(
+        "addi sp, sp, -13 * 4\n"    // allocate place for 13 registers
+
+        "sw ra,  0  * 4(sp)\n"      // Save callee-saved registers only
+        "sw s0,  1  * 4(sp)\n"
+        "sw s1,  2  * 4(sp)\n"
+        "sw s2,  3  * 4(sp)\n"
+        "sw s3,  4  * 4(sp)\n"
+        "sw s4,  5  * 4(sp)\n"
+        "sw s5,  6  * 4(sp)\n"
+        "sw s6,  7  * 4(sp)\n"
+        "sw s7,  8  * 4(sp)\n"
+        "sw s8,  9  * 4(sp)\n"
+        "sw s9,  10 * 4(sp)\n"
+        "sw s10, 11 * 4(sp)\n"
+        "sw s11, 12 * 4(sp)\n"
+
+        "sw sp, (a0)\n"
+        "lw sp, (a1)\n"
+
+        "lw ra,  0  * 4(sp)\n"  // Restore callee-saved registers from the next process's stack.
+        "lw s0,  1  * 4(sp)\n"
+        "lw s1,  2  * 4(sp)\n"
+        "lw s2,  3  * 4(sp)\n"
+        "lw s3,  4  * 4(sp)\n"
+        "lw s4,  5  * 4(sp)\n"
+        "lw s5,  6  * 4(sp)\n"
+        "lw s6,  7  * 4(sp)\n"
+        "lw s7,  8  * 4(sp)\n"
+        "lw s8,  9  * 4(sp)\n"
+        "lw s9,  10 * 4(sp)\n"
+        "lw s10, 11 * 4(sp)\n"
+        "lw s11, 12 * 4(sp)\n"
+
+        "addi sp, sp, 13 * 4\n"  // We've popped 13 4-byte registers from the stack
+        "ret\n"
+    );
+}
+
+void yield(void)
+{
+    struct process* next = idle_proc;
+
+    for (int i = 0; i < PROCS_MAX; i++)
+    {
+        struct process* proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0)
+        {
+            next = proc;
+            break;
+        }
+    }
+
+    if (next == current_proc)
+        return;
+
+    struct process* prev = current_proc;
+    current_proc = next;
+    switch_context(&prev->sp, &next->sp);
+}
+
+struct process* create_process(uint32_t pc)
+{
+    struct process* proc = NULL;
+    
+    int i = 0;
+    for (;i < PROCS_MAX; i++)
+    {
+        if (procs[i].state == PROC_UNUSED)
+        {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (!proc)
+        PANIC("create_process: no free process slots\n");
+
+    // Save values that will be restored on context switch
+    uint32_t* sp = (uint32_t*) &proc->stack[sizeof(proc->stack)];
+    *--sp = 0;                      // s11
+    *--sp = 0;                      // s10
+    *--sp = 0;                      // s9
+    *--sp = 0;                      // s8
+    *--sp = 0;                      // s7
+    *--sp = 0;                      // s6
+    *--sp = 0;                      // s5
+    *--sp = 0;                      // s4
+    *--sp = 0;                      // s3
+    *--sp = 0;                      // s2
+    *--sp = 0;                      // s1
+    *--sp = 0;                      // s0
+    *--sp = (uint32_t) pc;          // ra
+
+    proc->pid = i + 1;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t)sp;
+    return proc;
+}
+
+void delay(void)
+{
+    for (int i = 0; i < 30000000; i++)
+        __asm__ __volatile__("nop"); // prevent loop optimization
+}
+
+void proc_a_entry(void)
+{
+    static const int proc_a_times = 10;
+
+    printf("Starting process 'a'\n");
+    for (int i = 0; i < proc_a_times; i++)
+    {
+        putchar('A');
+        yield();
+        delay();
+    }
+
+    // change to proc_ended
+    current_proc->state  = PROC_UNUSED;
+    printf("\nFinished proc 'a'\n");
+    yield();
+}
+
+void proc_b_entry(void)
+{
+    static const int proc_b_times = 20;
+
+    printf("Starting process 'b'\n");
+    for (int i = 0; i < proc_b_times; i++)
+    {
+        putchar('B');
+        yield();
+        delay();
+    }
+
+    // change to proc_ended
+    current_proc->state  = PROC_UNUSED;
+    printf("\nFinished proc 'b'\n");
+    yield();
+}
+
 void kernel_main(void)
 {
     memset(__bss, 0, (size_t)__bss_end - (size_t)__bss);
 
     WRITE_CSR(stvec, (uint32_t)kernel_entry);
 
+    idle_proc = create_process((uint32_t) NULL);
+    idle_proc->pid = 0;
+    current_proc = idle_proc;
+
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
+    
+    yield();
+    PANIC("Swtiched to the idle process\n");
+
+#if 0
     printf("\n\nHello, %s", "World\n");
     printf("1 + 2 = %d\n", 1 + 2);
     printf("%x\n", 0x1234abcd);
@@ -148,7 +312,6 @@ void kernel_main(void)
 
     PANIC("Booted!");
 
-#if 0
     // call trap_handler
     __asm__ __volatile__("unimp");
 
